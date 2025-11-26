@@ -5,10 +5,10 @@
         <label for="search">Поиск:</label>
         <input
           id="search"
-          v-model="filters.search"
+          v-model="search"
           type="text"
           placeholder="Название товара..."
-          @input="handleFilterChange"
+          class="filter-input"
         >
       </div>
       
@@ -16,12 +16,12 @@
         <label for="category">Категория:</label>
         <select
           id="category"
-          v-model="filters.category"
-          @change="handleFilterChange"
+          v-model="category"
+          class="filter-select"
         >
           <option value="">Все категории</option>
-          <option v-for="category in categories" :key="category" :value="category">
-            {{ category }}
+          <option v-for="cat in categories" :key="cat" :value="cat">
+            {{ cat }}
           </option>
         </select>
       </div>
@@ -30,10 +30,10 @@
         <label for="minPrice">Мин. цена:</label>
         <input
           id="minPrice"
-          v-model.number="filters.minPrice"
+          v-model.number="minPrice"
           type="number"
           placeholder="0"
-          @input="handleFilterChange"
+          class="filter-input"
         >
       </div>
       
@@ -48,7 +48,7 @@
       <div v-else>
         <div class="products-grid">
           <div
-            v-for="product in products"
+            v-for="product in paginatedProducts"
             :key="product.id"
             class="product-card"
           >
@@ -58,42 +58,42 @@
           </div>
         </div>
         
-        <div v-if="products.length === 0" class="no-products">
+        <div v-if="filteredProducts.length === 0" class="no-products">
           Товары не найдены
         </div>
       </div>
     </div>
 
     <!-- Пагинация -->
-    <div v-if="meta.total > 0" class="pagination">
+    <div v-if="filteredProducts.length > 0" class="pagination">
       <button
-        :disabled="!links.prev"
-        @click="goToPage(links.prev)"
+        :disabled="currentPage === 1"
+        @click="prevPage"
         class="pagination-btn"
       >
         Назад
       </button>
       
       <button
-        v-for="pageNum in pageNumbers"
+        v-for="pageNum in pages"
         :key="pageNum"
         @click="goToPage(pageNum)"
-        :class="['pagination-btn', { active: pageNum === meta.current_page }]"
+        :class="['pagination-btn', { active: pageNum === currentPage }]"
       >
         {{ pageNum }}
       </button>
       
       <button
-        :disabled="!links.next"
-        @click="goToPage(links.next)"
+        :disabled="currentPage === totalPages"
+        @click="nextPage"
         class="pagination-btn"
       >
         Вперёд
       </button>
     </div>
 
-    <div class="pagination-info" v-if="meta.total > 0">
-      Показано {{ meta.from }}-{{ meta.to }} из {{ meta.total }} товаров
+    <div class="pagination-info" v-if="filteredProducts.length > 0">
+      Показано {{ meta.from }}-{{ meta.to }} из {{ filteredProducts.length }} товаров
     </div>
   </div>
 </template>
@@ -101,7 +101,20 @@
 <script>
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getProducts, getCategories } from '../services/productService.js'
+
+// Генерация товаров
+function generateAllProducts() {
+  const items = []
+  for (let i = 1; i <= 150; i++) {
+    items.push({
+      id: i,
+      title: `Товар ${i}`,
+      price: 50 + i * 10,
+      category: i % 3 === 0 ? 'Электроника' : i % 3 === 1 ? 'Одежда' : 'Книги'
+    })
+  }
+  return items
+}
 
 export default {
   name: 'Products',
@@ -109,124 +122,184 @@ export default {
     const route = useRoute()
     const router = useRouter()
     
-    // Реактивные данные
-    const products = ref([])
-    const meta = ref({})
-    const links = ref({})
+    // Состояние интерфейса
+    const currentPage = ref(1)
+    const perPage = 10
+    const search = ref('')
+    const category = ref('')
+    const minPrice = ref('')
     const loading = ref(false)
-    const categories = ref([])
     
-    // Фильтры
-    const filters = ref({
-      search: '',
-      category: '',
-      minPrice: ''
+    const allProducts = ref([])
+    const categories = ref([])
+
+    // Мета-данные для пагинации
+    const meta = computed(() => {
+      const total = filteredProducts.value.length
+      const from = (currentPage.value - 1) * perPage + 1
+      const to = Math.min(currentPage.value * perPage, total)
+      
+      return {
+        from,
+        to,
+        total
+      }
     })
 
-    // Вычисляемые свойства для пагинации
-    const pageNumbers = computed(() => {
-      if (!meta.value.last_page) return []
+    // Вычисляемые значения
+    const filteredProducts = computed(() => {
+      let filtered = allProducts.value
       
-      const current = meta.value.current_page
-      const last = meta.value.last_page
-      const delta = 2
-      const range = []
-      
-      for (let i = Math.max(2, current - delta); i <= Math.min(last - 1, current + delta); i++) {
-        range.push(i)
+      // Фильтр по поиску
+      if (search.value) {
+        const searchTerm = search.value.toLowerCase()
+        filtered = filtered.filter(product => 
+          product.title.toLowerCase().includes(searchTerm)
+        )
       }
       
-      if (current - delta > 2) {
-        range.unshift('...')
-      }
-      if (current + delta < last - 1) {
-        range.push('...')
+      // Фильтр по категории
+      if (category.value) {
+        filtered = filtered.filter(product => 
+          product.category === category.value
+        )
       }
       
-      range.unshift(1)
-      if (last !== 1) range.push(last)
+      // Фильтр по минимальной цене
+      if (minPrice.value) {
+        filtered = filtered.filter(product => 
+          product.price >= parseInt(minPrice.value)
+        )
+      }
       
-      return range
+      return filtered
     })
 
-    // Загрузка товаров
-    const loadProducts = async () => {
-      loading.value = true
-      
-      try {
-        const page = parseInt(route.query.page) || 1
-        const result = getProducts(page, 10, filters.value)
-        
-        products.value = result.data
-        meta.value = result.meta
-        links.value = result.links
-      } catch (error) {
-        console.error('Ошибка загрузки товаров:', error)
-      } finally {
-        loading.value = false
+    const totalPages = computed(() => {
+      return Math.max(1, Math.ceil(filteredProducts.value.length / perPage))
+    })
+
+    const paginatedProducts = computed(() => {
+      // Корректировка текущей страницы
+      if (currentPage.value > totalPages.value) {
+        currentPage.value = totalPages.value
       }
-    }
-
-    // Переход на страницу
-    const goToPage = (page) => {
-      if (page === '...') return
       
-      const query = { ...route.query, page }
-      router.push({ query })
-    }
+      const start = (currentPage.value - 1) * perPage
+      return filteredProducts.value.slice(start, start + perPage)
+    })
 
-    // Обработчик изменения фильтров
-    const handleFilterChange = () => {
-      const query = { ...filters.value, page: 1 }
+    const pages = computed(() => {
+      return Array.from({ length: totalPages.value }, (_, i) => i + 1)
+    })
+
+    // Синхронизация с URL
+    function syncQueryWithState() {
+      const query = {
+        page: String(currentPage.value),
+        search: search.value || undefined,
+        category: category.value || undefined,
+        minPrice: minPrice.value || undefined
+      }
       
-      // Удаляем пустые значения
+      // Удаляем undefined значения
       Object.keys(query).forEach(key => {
-        if (!query[key]) delete query[key]
+        if (query[key] === undefined) delete query[key]
       })
       
-      router.push({ query })
+      router.push({ 
+        name: 'Products', 
+        query 
+      })
     }
 
     // Очистка фильтров
-    const clearFilters = () => {
-      filters.value = {
-        search: '',
-        category: '',
-        minPrice: ''
-      }
-      router.push({ name: 'Products' })
+    function clearFilters() {
+      search.value = ''
+      category.value = ''
+      minPrice.value = ''
+      currentPage.value = 1
     }
 
-    // Наблюдатель за изменениями route
-    watch(
-      () => route.query,
-      (newQuery) => {
-        // Обновляем фильтры из query
-        filters.value.search = newQuery.search || ''
-        filters.value.category = newQuery.category || ''
-        filters.value.minPrice = newQuery.minPrice || ''
-        
-        // Загружаем товары
-        loadProducts()
-      },
-      { immediate: true }
-    )
+    // Переходы между страницами
+    function goToPage(n) {
+      if (n < 1 || n > totalPages.value) return
+      currentPage.value = n
+    }
 
-    // Инициализация
+    function prevPage() {
+      goToPage(currentPage.value - 1)
+    }
+
+    function nextPage() {
+      goToPage(currentPage.value + 1)
+    }
+
+    // Watchers
+    watch(currentPage, () => {
+      syncQueryWithState()
+    })
+
+    watch([search, category, minPrice], () => {
+      currentPage.value = 1
+      syncQueryWithState()
+    })
+
+    // Восстановление состояния из URL
     onMounted(() => {
-      categories.value = getCategories()
+      loading.value = true
+      
+      // Инициализация данных
+      setTimeout(() => {
+        allProducts.value = generateAllProducts()
+        categories.value = [...new Set(allProducts.value.map(p => p.category))]
+        
+        // Восстановление из query
+        const query = route.query
+        
+        if (typeof query.page === 'string') {
+          const pageNum = parseInt(query.page, 10)
+          if (!isNaN(pageNum) && pageNum > 0) {
+            currentPage.value = pageNum
+          }
+        }
+        
+        if (typeof query.search === 'string') {
+          search.value = query.search
+        }
+        
+        if (typeof query.category === 'string') {
+          category.value = query.category
+        }
+        
+        if (typeof query.minPrice === 'string') {
+          minPrice.value = query.minPrice
+        }
+        
+        loading.value = false
+      }, 300) // Имитация загрузки
     })
 
     return {
-      products,
-      meta,
-      links,
-      loading,
+      // Состояние
+      currentPage,
+      search,
+      category,
+      minPrice,
       categories,
-      filters,
-      pageNumbers,
+      loading,
+      meta,
+      
+      // Вычисляемые
+      filteredProducts,
+      paginatedProducts,
+      totalPages,
+      pages,
+      
+      // Методы
       goToPage,
-      handleFilterChange,
+      prevPage,
+      nextPage,
       clearFilters
     }
   }
@@ -263,12 +336,20 @@ export default {
   font-size: 14px;
 }
 
-.filter-group input,
-.filter-group select {
+.filter-input,
+.filter-select {
   padding: 8px 12px;
   border: 1px solid #ddd;
   border-radius: 4px;
   font-size: 14px;
+  min-width: 150px;
+}
+
+.filter-input:focus,
+.filter-select:focus {
+  outline: none;
+  border-color: #007bff;
+  box-shadow: 0 0 0 2px rgba(0,123,255,0.25);
 }
 
 .clear-btn {
@@ -279,6 +360,8 @@ export default {
   border-radius: 4px;
   cursor: pointer;
   font-size: 14px;
+  height: fit-content;
+  transition: background-color 0.2s;
 }
 
 .clear-btn:hover {
@@ -308,7 +391,7 @@ export default {
   padding: 20px;
   border-radius: 8px;
   box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-  transition: transform 0.2s;
+  transition: transform 0.2s, box-shadow 0.2s;
 }
 
 .product-card:hover {
@@ -319,6 +402,7 @@ export default {
 .product-card h3 {
   margin-bottom: 10px;
   color: #333;
+  font-size: 16px;
 }
 
 .product-card .category {
@@ -338,6 +422,9 @@ export default {
   padding: 40px;
   color: #666;
   font-size: 18px;
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
 
 .pagination {
@@ -355,10 +442,12 @@ export default {
   border-radius: 4px;
   cursor: pointer;
   min-width: 40px;
+  transition: all 0.2s;
 }
 
 .pagination-btn:hover:not(:disabled) {
   background: #f8f9fa;
+  border-color: #007bff;
 }
 
 .pagination-btn.active {
@@ -376,5 +465,6 @@ export default {
   text-align: center;
   color: #666;
   margin-bottom: 20px;
+  font-size: 14px;
 }
 </style>
